@@ -9,35 +9,44 @@ const int pressure = A1;
 const int temp = A0;
 const int button = 4;
 const int servo = 9;
-  
+
+// enter pool_depth in cm
+const int pool_depth = 220;
+
 // target depths
 const int target_depths_size = 4;
-const int target_depths[target_depths_size] = {0, 20, 110, 210}; // example numbers if pool is 2.2m deep
+int target_depths[target_depths_size] = {0, 20, 110, 210}; // example numbers if pool is 2.2m deep, is changed in setup()
+  
+const int num_points = 22;
+const long raw_values[num_points] = {8316, 8300, 8703, 8830, 9115, 9335, 9744, 10000, 10370, 10655, 11071, 11430, 11790, 12080, 12327, 12745, 13112, 13358, 13630, 13960, 14255, 14694};
+const int depths[num_points] = {0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160, 170, 180, 190, 200, 210};
+
+long pres; // holds current depth
   
 // motor values 
 const int motor_stop = 91;
-const int max_motor_down = 73;
-const int max_motor_up = 101;
+const int max_motor_down = 55;
+const int max_motor_up = 103;
 const int motor_hover = 79;
-const int max_error_range = 60; // used for map() function as the upper boumd
-
-//atmospheric pressure from https://barometricpressure.today/cities/long-beach-us to calculate gauge pressure in get_depth()
-const int atmospheric_pressure = 101490.0;
+const int max_error_range = 35; // used for map() function as the upper bound
 
 void setup() 
 {
+  target_depths[3] = pool_depth - 25;
+  target_depths[2] = (pool_depth / 2) - 25;
+  
   Serial.begin(9600);
 
-  // set pins
+  pinMode(2, INPUT);   // HX710 DOUT
+  pinMode(3, OUTPUT);  // HX710 SCK
   pinMode(button, INPUT_PULLUP);
 
-  // initializing motor
   delay(1000);
   myservo.attach(servo,1000,2000);
   Serial.println("Initializing ESC");
   myservo.write(180);
   delay(5000);
-  myservo.write(91);
+  myservo.write(motor_stop);
   delay(1000);
   Serial.println("ESC Initialized");
   delay(3000);
@@ -45,15 +54,12 @@ void setup()
   
 void loop() 
 { 
-  // waiting for button to be pressed to begin
-  Serial.println("press button to start");
+  Serial.println("press button to start program");
   while (digitalRead(button) == HIGH) {}
   delay(300);
 
-  // goes through every target depth
   for (int i = 0; i < target_depths_size; i++)
   { 
-    // if target depth is the air, wait for a button press to log data then skip rest of iteration
     if (i == 0)
     {
       Serial.println("press button again to take air temp");
@@ -62,7 +68,6 @@ void loop()
       log_data(30, get_temperature());
       continue;
     }
-    // if for loop is on its second iteration, wait for a button press to confirm MATE Float is in water and log data
     if (i == 1)
     {
       Serial.println("press button once MATE Float is in the water");
@@ -76,15 +81,19 @@ void loop()
     hover(target_depths[i]);  
     log_data(-get_depth(), get_temperature()); 
 
-    // when at end of loop, return to the surface
     if (i == target_depths_size - 1)
     {
-      Serial.println("ascending to surface...");
-      go_to_depth(5);
-      Serial.println("successful");
-      myservo.write(motor_stop);
+      // Return to surface or stop motor if needed
     }
   }
+}
+
+void ascent()
+{
+  Serial.println("ascending to surface...");
+  go_to_depth(30);
+  Serial.println("successful");
+  myservo.write(motor_stop);
 }
 
 void go_to_depth(int target)
@@ -94,7 +103,6 @@ void go_to_depth(int target)
   int speed; 
   int error;
 
-  // while depth is not within 5cm...
   while (abs(get_depth() - target) > 5)
   {
     long temp_depth = get_depth();
@@ -102,7 +110,6 @@ void go_to_depth(int target)
 
     error = temp_depth - target;
 
-    // if depth is lower than target go down, based on map()
     if (error < 0)
     {
       speed = map(abs(error), 0, 50, motor_hover, max_motor_down);
@@ -111,15 +118,12 @@ void go_to_depth(int target)
     }
     else
     {
-      // if depth is higher than target go up based on map()
       speed = map(abs(error), 0, max_error_range, motor_hover, max_motor_up);
       speed = constrain(speed, motor_hover, max_motor_up);
       myservo.write(speed);
     }
-    // making sure to not bombard motor
-    delay(20);
   }
-  //stopping movement once complete
+
   Serial.print("going to depth "); Serial.print(target); Serial.println(" successful"); 
 }
 
@@ -135,10 +139,8 @@ void hover(int temp_target)
     long temp_depth = get_depth();
     Serial.print("depth = "); Serial.println(temp_depth);
 
-    // if depth is within 5 cm error, check if countdown should continue
-    if (abs(temp_depth - temp_target) <= 5)
+    if (abs(temp_depth - temp_target) <= 25)
     {
-      // stop motor and break when countdown finished
       if (millis() - start_time >= hover_duration)
       {
         Serial.println("hover complete");
@@ -148,45 +150,77 @@ void hover(int temp_target)
     }
     else
     {
-      // depth is out of range, reset countdown and correct positioning
       Serial.println("out of range, resetting countdown");
       start_time = millis(); 
 
-      // correcting position
       go_to_depth(temp_target);
     }
-    delay(10); //how often it updates
   }
 }
 
-//gets depth using formula found here https://bluerobotics.com/learn/pressure-depth-calculator/
+long read_sensor() {
+  while (digitalRead(2)) {}
+
+  long result = 0;
+  for (int i = 0; i < 24; i++) {
+    digitalWrite(3, HIGH);
+    digitalWrite(3, LOW);
+    result = result << 1;
+    if (digitalRead(2)) {
+      result++;
+    }
+  }
+  result = result ^ 0x800000;
+
+  for (char i = 0; i < 3; i++) {
+    digitalWrite(3, HIGH);
+    digitalWrite(3, LOW);
+  }
+
+  return result;
+}
+
+float interpolate_depth(long raw_value) 
+{
+  long rounded_value = round(raw_value / 1000.0);
+
+  if (rounded_value <= raw_values[0]) return depths[0];
+  if (rounded_value >= raw_values[num_points - 1]) 
+  {
+    float slope = (float)(depths[num_points - 1] - depths[num_points - 2]) / (raw_values[num_points - 1] - raw_values[num_points - 2]);
+    return depths[num_points - 1] + slope * (rounded_value - raw_values[num_points - 1]);
+  }
+
+  for (int i = 0; i < num_points - 1; i++) 
+  {
+    if (rounded_value >= raw_values[i] && rounded_value <= raw_values[i + 1]) 
+    {
+      float slope = (float)(depths[i + 1] - depths[i]) / (raw_values[i + 1] - raw_values[i]);
+      return depths[i] + slope * (rounded_value - raw_values[i]);
+    }
+  }
+  return -1;
+}
+
 float get_depth() 
 {
-  int sensor_value = analogRead(pressure); // gets analogRead() 10 bit
-  float voltage = sensor_value * (5.0 / 1023.0); // converts the analogRead from 10 bit to voltage
-  voltage = constrain(voltage, 0.5, 4.5); // makes sure it is not below or above range
-  float psi = (voltage - 0.5) * (30.0 / 4.0); // .5V = 0 PSI, 4.5V = 30 PSI.  0-4V, 0-30 PSI
-  float pascal = psi * 6894.757; // converts PSI to pascal for formula
-  float gauge_pressure = pascal - atmospheric_pressure; // gets gauge pressure for formula
-  float meters = gauge_pressure / (997.0474 * 9.80665); // uses freshwater density and gravity from website
-  return meters * 100;
+  long raw_data = read_sensor();
+  return interpolate_depth(raw_data);
 }
 
 float get_temperature() 
 {
-  int adcVal = analogRead(temp); 
-  float v = adcVal * 5.0 / 1023.0;  
-  float Rt = 10.0 * v / (5.0 - v); 
-  float tempK = 1.0 / (log(Rt / 10.0) / 3950.0 + 1.0 / 298.15); 
+  int adcVal = analogRead(temp);
+  float v = adcVal * 5.0 / 1024;
+  float Rt = 10 * v / (5 - v);
+  float tempK = 1 / (log(Rt / 10) / 3950 + 1 / (273.15 + 25));
   float tempC = tempK - 273.15;
   return tempC;
 }
-  
-// prints data
+
 void log_data(float temp_depth, float temp_temp)
 {
   Serial.print(temp_depth);
   Serial.print(",");
   Serial.println(temp_temp);
 }
-
